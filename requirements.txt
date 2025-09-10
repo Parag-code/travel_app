@@ -1,0 +1,9 @@
+Flask
+flask-cors
+pandas
+python-dotenv
+requests
+openai
+parsedatetime
+python-dateutil
+gunicorn
