@@ -231,7 +231,6 @@ def run_smart_flight_search(user_query):
             "airline_include": airline or None,
             "flight_search": "✅ Flights fetched from SkyExperts API",
             "flights": mindtrip,   # ✅ direct flights summary only
-            "api_sc": payload["sc"]
 }
 
 
@@ -243,4 +242,5 @@ def run_smart_flight_search(user_query):
     
     
 if __name__ == '__main__':
+
     run_smart_flight_search()
