@@ -5,6 +5,11 @@ from openai import OpenAI
 from dotenv import load_dotenv
 import os
 from datetime import datetime, timedelta
+import calendar
+import parsedatetime
+import dateutil.parser
+from dateutil.relativedelta import relativedelta
+
 
 # Load data
 attractions = pd.read_csv("uae_attractions.csv")
@@ -75,33 +80,30 @@ from datetime import datetime
 
 def extract_start_date(query):
     """
-    Use OpenAI LLM to extract a normalized start date (YYYY-MM-DD)
-    from any date-related text in the query.
-    Handles formats like:
-    - Absolute dates: '12 Sep', '20 Dec 2024', '15/09/2025'
-    - Relative: 'next Friday', 'tomorrow', 'day after tomorrow'
-    - Named holidays: 'Christmas', 'New Year'
+    Use OpenAI LLM to extract a date phrase (not normalized).
+    Examples: "next Wednesday", "tomorrow", "15 September", "after 5 days"
+    Normalization to ISO (YYYY-MM-DD) is handled later in Python.
     Returns None if no date is present.
     """
     prompt = f"""
-    You are a date parser. 
-    Extract exactly ONE start date from the query and normalize it to ISO format (YYYY-MM-DD).
-    If the query mentions relative days (like "next Friday", "next Monday", "tomorrow",next week), 
-    calculate the exact date based on today's date.
+    You are a date extractor.
+    Extract exactly ONE date or relative date phrase from the query as the user mentioned it.
+    Do NOT convert or normalize into ISO format.
 
-    Rules:
-    - "Next <weekday>" means the very next occurrence of that weekday *after today*.
-    - If today IS that weekday, then "next <weekday>" means one week later.
-    - Handle formats like "12 Sep", "12 September 2025", "12/09/25", "12-09-2025".
-    - Handle relative phrases like "tomorrow", "day after tomorrow".
-    - Handle common holidays like "Christmas" (25 Dec), "New Year" (1 Jan).
-    - Always return one ISO date: YYYY-MM-DD
-    - If no valid date is found, return: null
+    Examples of valid outputs:
+    - "next Wednesday"
+    - "tomorrow"
+    - "day after tomorrow"
+    - "15 September"
+    - "after 5 days"
+    - "Christmas"
+    - "New Year"
 
-    Today's date: {datetime.today().strftime('%Y-%m-%d')}
+    If no date phrase is found, return: null.
+
     Query: "{query}"
 
-    Output format: YYYY-MM-DD or null
+    Output format: the exact phrase (string) or null
     """
 
     response = client.chat.completions.create(
@@ -112,40 +114,58 @@ def extract_start_date(query):
 
     content = response.choices[0].message.content.strip()
 
-    # Handle null case
     if content.lower() == "null":
         return None
 
-    # Extract clean ISO-like date
-    match = re.search(r"\d{4}-\d{2}-\d{2}", content)
+    # Remove wrapping quotes if LLM adds them
+    phrase = content.strip().strip('"').strip("'")
+    return phrase
+
+def parse_date_string(natural_date, base_date=None):
+    if not natural_date:
+        return None
+
+    natural_date_lower = natural_date.lower().strip()
+    today = base_date or datetime.now()
+
+    # ✅ Special cases first
+    if "day after tomorrow" in natural_date_lower:
+        return (today + timedelta(days=2)).strftime('%Y-%m-%d')
+    if "tomorrow" in natural_date_lower:
+        return (today + timedelta(days=1)).strftime('%Y-%m-%d')
+
+    # ✅ Handle weekdays explicitly
+    weekdays = list(calendar.day_name)
+    for i, wd in enumerate(weekdays):
+        if wd.lower() in natural_date_lower:
+          weekday_num = i
+          days_ahead = (weekday_num - today.weekday() + 7) % 7
+          if days_ahead == 0:
+               days_ahead = 7  # same day → push 7 days
+          return (today + timedelta(days=days_ahead)).strftime('%Y-%m-%d')
+
+
+    # ✅ Handle "next month"
+    if natural_date_lower == "next month":
+        return (today + relativedelta(months=1)).strftime('%Y-%m-%d')
+
+    # ✅ Handle "after N days"
+    match = re.search(r'after (\d+) days?', natural_date_lower)
     if match:
-        return match.group(0)
+        days = int(match.group(1))
+        return (today + timedelta(days=days)).strftime('%Y-%m-%d')
 
-    # Extra handling: check for DD/MM/YYYY or DD-MM-YYYY or DD Mon YYYY
-    alt_match = re.search(r"(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})", content)
-    if alt_match:
-        d, m, y = alt_match.groups()
-        if len(y) == 2:  # normalize 2-digit year
-            y = "20" + y
-        try:
-            return datetime(int(y), int(m), int(d)).strftime("%Y-%m-%d")
-        except:
-            pass
+    # ✅ parsedatetime fallback
+    cal = parsedatetime.Calendar()
+    time_struct, parse_status = cal.parse(natural_date, sourceTime=today.timetuple())
+    if parse_status != 0:
+        return datetime(*time_struct[:6]).strftime('%Y-%m-%d')
 
-    # Check for DD Mon YYYY (e.g., 12 Sep 2025)
-    alt_match2 = re.search(r"(\d{1,2})\s+([A-Za-z]{3,9})\s+(\d{4})", content)
-    if alt_match2:
-        d, mon, y = alt_match2.groups()
-        try:
-            return datetime.strptime(f"{d} {mon} {y}", "%d %B %Y").strftime("%Y-%m-%d")
-        except:
-            try:
-                return datetime.strptime(f"{d} {mon} {y}", "%d %b %Y").strftime("%Y-%m-%d")
-            except:
-                pass
-
-    return None
-
+    # ✅ dateutil fallback
+    try:
+        return dateutil.parser.parse(natural_date, fuzzy=True, default=today).strftime('%Y-%m-%d')
+    except Exception:
+        return None
 
 
 def filter_by_preferences(city_attractions, preferences):
@@ -222,7 +242,10 @@ def build_itinerary(query):
     preferences = list(set([p.capitalize() for p in preferences]))
 
     # Start date via LLM
-    start_date = extract_start_date(query)
+    # Start date via LLM + normalize
+    raw_start_date = extract_start_date(query)
+    start_date = parse_date_string(raw_start_date) if raw_start_date else None
+ 
 
     # Split days
     city_day_counts = split_days_among_cities(cities, days)
