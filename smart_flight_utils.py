@@ -40,23 +40,25 @@ You must:
 - Understand Hindi and English date/time phrases (e.g., "कल", "परसों", "5 दिन बाद", 
   "अगला सोमवार", "अगले महीने", "next Friday", "next Tuesday", "next Wednesday", 
   "next Saturday", "next Thursday", "next Sunday").
-- Always normalize all date expressions into strict ISO format: YYYY-MM-DD.
-- "Next <weekday>" = the very next occurrence of that weekday after today.  
-  If today is that weekday, then "next <weekday>" means 7 days later.  
-- If `retdate` is relative (e.g., "10 दिन बाद", "after 10 days"), calculate it relative to the `depdate`, not today's date.
-- Handle absolute dates: "12 Sep", "12 September 2025", "12/09/25", "12-09-2025".
-- Handle relative phrases: "tomorrow", "day after tomorrow".
-- Handle common holidays: "Christmas" = 25 Dec, "New Year" = 1 Jan (if already passed this year, take next year).
-- Return all dates in YYYY-MM-DD format in the JSON output.
+- Extract date/time expressions exactly as they are mentioned in the query 
+  (e.g., "next Wednesday", "tomorrow", "15 September").
+- Do NOT convert dates into ISO format yourself. 
+  The system will handle normalization into YYYY-MM-DD.
+
+- If `retdate` is relative (e.g., "10 दिन बाद", "after 10 days"), 
+  extract it as given (e.g., "after 10 days") so it can be normalized later.
+
 - Handle both Hindi and English city/airport names and convert them to their **IATA 3-letter codes**.
 - If a location has multiple airports, choose the primary international passenger airport.
-- If the user mentions an airline by name (e.g., "Indigo", "Air India", "SpiceJet"), convert it to the correct IATA airline code ("6E" for Indigo, "AI" for Air India, "SG" for SpiceJet) and put that code in `airline_include`. Always return the IATA code, never the name.
+- If the user mentions an airline by name (e.g., "Indigo", "Air India", "SpiceJet"), 
+  convert it to the correct IATA airline code ("6E" for Indigo, "AI" for Air India, "SG" for SpiceJet) 
+  and put that code in `airline_include`. Always return the IATA code, never the name.
 
 Extract and return only JSON with the following keys:
 - from: departure airport IATA code (3 letters, e.g., DEL for Delhi)
 - to: arrival airport IATA code (3 letters, e.g., DXB for Dubai)
-- depdate: departure date in YYYY-MM-DD format
-- retdate: return date in YYYY-MM-DD format (optional)
+- depdate: departure date (natural phrase, e.g., "next Wednesday", "15 September")
+- retdate: return date (natural phrase, optional, e.g., "after 5 days")
 - adults: number of adults (default: 1)
 - children: number of children (default: 0)
 - infants: number of infants (default: 0)
@@ -66,16 +68,19 @@ Extract and return only JSON with the following keys:
 Rules:
 - Only assign a value if it is clearly mentioned in the query.
 - If a field is missing, set its value to null or "Not Provided", except:
-  * Set "adults" to 1 by default
-  * Set "children" and "infants" to 0 by default
-  * Set "cabin" to "economy" by default
+  * adults = 1
+  * children = 0
+  * infants = 0
+  * cabin = "economy"
 
-Return valid JSON only. Do not explain anything.
+Return **valid JSON only**. Do not explain anything.
 
 Query: "{query}"
 """
 
 from dateutil.relativedelta import relativedelta  # put at top of file
+
+import calendar
 
 def parse_date_string(natural_date, base_date=None):
     if not natural_date:
@@ -84,28 +89,40 @@ def parse_date_string(natural_date, base_date=None):
     natural_date_lower = natural_date.lower().strip()
     today = base_date or datetime.now()
 
-    # Special cases first
+    # ✅ Special cases first
     if "day after tomorrow" in natural_date_lower:
         return (today + timedelta(days=2)).strftime('%Y-%m-%d')
     if "tomorrow" in natural_date_lower:
         return (today + timedelta(days=1)).strftime('%Y-%m-%d')
 
-    # Handle "next month"
+    # ✅ Handle weekdays explicitly
+    weekdays = list(calendar.day_name)
+    for i, wd in enumerate(weekdays):
+        if wd.lower() in natural_date_lower:
+          weekday_num = i
+          days_ahead = (weekday_num - today.weekday() + 7) % 7
+          if days_ahead == 0:
+               days_ahead = 7  # same day → push 7 days
+          return (today + timedelta(days=days_ahead)).strftime('%Y-%m-%d')
+
+
+    # ✅ Handle "next month"
     if natural_date_lower == "next month":
         return (today + relativedelta(months=1)).strftime('%Y-%m-%d')
 
+    # ✅ Handle "after N days"
     match = re.search(r'after (\d+) days?', natural_date_lower)
     if match:
-            days = int(match.group(1))
-            return (today + timedelta(days=days)).strftime('%Y-%m-%d')
+        days = int(match.group(1))
+        return (today + timedelta(days=days)).strftime('%Y-%m-%d')
 
-    # parsedatetime fallback
+    # ✅ parsedatetime fallback
     cal = parsedatetime.Calendar()
     time_struct, parse_status = cal.parse(natural_date, sourceTime=today.timetuple())
     if parse_status != 0:
         return datetime(*time_struct[:6]).strftime('%Y-%m-%d')
 
-    # dateutil fallback
+    # ✅ dateutil fallback
     try:
         return dateutil.parser.parse(natural_date, fuzzy=True, default=today).strftime('%Y-%m-%d')
     except Exception:
@@ -231,6 +248,7 @@ def run_smart_flight_search(user_query):
             "airline_include": airline or None,
             "flight_search": "✅ Flights fetched from SkyExperts API",
             "flights": mindtrip,   # ✅ direct flights summary only
+            "api_sc": payload["sc"]
 }
 
 
@@ -242,5 +260,4 @@ def run_smart_flight_search(user_query):
     
     
 if __name__ == '__main__':
-
     run_smart_flight_search()
